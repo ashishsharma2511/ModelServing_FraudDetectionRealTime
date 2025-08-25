@@ -76,7 +76,7 @@ predictions_df = pipeline_model.transform(json_df)
 # Output predictions to Kafka
 # ----------------------
 kafka_out = predictions_df.select(
-    to_json(struct("amount","merchant","category","time_of_day","deviceType","location", "prediction")).alias("value")
+    to_json(struct("amount","merchant","category","time_of_day","device_type","location", "prediction")).alias("value")
 )
 
 kafka_query = kafka_out.writeStream \

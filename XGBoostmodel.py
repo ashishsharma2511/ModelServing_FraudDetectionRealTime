@@ -1,58 +1,69 @@
 import mlflow
 import mlflow.spark
-from pyspark.sql import SparkSession 
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 from xgboost.spark import SparkXGBClassifier
-from pyspark.ml import PipelineModel
+from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StringIndexer
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator, RegressionEvaluator
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
-#SparkSession
-SparkSession = SparkSession.builder.appName("XGBoostModel").getOrCreate()
+# ----------------------
+# Spark session
+# ----------------------
+spark = SparkSession.builder.appName("XGBoostModel").getOrCreate()
 
-#read data
-df = SparkSession.read.csv("Training_data.csv", header=True, inferSchema=True)
+# ----------------------
+# Read data
+# ----------------------
+df = spark.read.csv("Training_data.csv", header=True, inferSchema=True)
+df = df.withColumn("is_fraud", col("is_fraud").cast("int"))
+
+# ----------------------
+# Preprocessing pipeline
+# ----------------------
 merchant_indexer = StringIndexer(inputCol="merchant", outputCol="merchantIndex")
 category_indexer = StringIndexer(inputCol="category", outputCol="categoryIndex")
 device_type_indexer = StringIndexer(inputCol="device_type", outputCol="deviceTypeIndex")
 location_indexer = StringIndexer(inputCol="location", outputCol="locationIndex")
-
-df = merchant_indexer.fit(df).transform(df)
-df = category_indexer.fit(df).transform(df)
-df = device_type_indexer.fit(df).transform(df)
-df = location_indexer.fit(df).transform(df)
-df = df.withColumn("is_fraud", col("is_fraud").cast("int"))
-
-feature_cols= ["amount","merchantIndex","categoryIndex","time_of_day","deviceTypeIndex","locationIndex"]
+feature_cols = ["amount","merchantIndex","categoryIndex","time_of_day","deviceTypeIndex","locationIndex"]
 assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
-df = assembler.transform(df)
 
-train_df, test_df = df.randomSplit([0.8, 0.2], seed=42)
+preprocessing_pipeline = Pipeline(stages=[merchant_indexer, category_indexer, device_type_indexer, location_indexer, assembler])
+preprocessing_model = preprocessing_pipeline.fit(df)
+df_transformed = preprocessing_model.transform(df)
 
+train_df, test_df = df_transformed.randomSplit([0.8, 0.2], seed=42)
+
+# ----------------------
+# MLflow setup
+# ----------------------
 mlflow.set_tracking_uri("http://127.0.0.1:5000")
 mlflow.set_experiment("XGModelforFraudDetection")
 
 with mlflow.start_run():
+    # ----------------------
+    # Train XGBoost
+    # ----------------------
     xgb = SparkXGBClassifier(
         features_col="features",
         label_col="is_fraud",
         prediction_col="prediction",
         numWorkers=2
     )
+    xgb_model = xgb.fit(train_df)
 
-    # Train -> Model
-    model = xgb.fit(train_df)
-    mlflow.spark.log_model(model, "model")
-
-    #predict
-    predictions = model.transform(test_df)
-
-    #evaluate model
+    # ----------------------
+    # Evaluate
+    # ----------------------
+    predictions = xgb_model.transform(test_df)
     evaluator = MulticlassClassificationEvaluator(labelCol="is_fraud", predictionCol="prediction", metricName="accuracy")
     accuracy = evaluator.evaluate(predictions)
     mlflow.log_metric("accuracy", accuracy)
 
-    # Log model
-    mlflow.spark.log_model(model, "xgboost_classifier")
+    # ----------------------
+    # Log models separately
+    # ----------------------
+    mlflow.spark.log_model(preprocessing_model, "preprocessing_pipeline")
+    mlflow.spark.log_model(xgb_model, "xgb_model")
 
-SparkSession.stop()
+spark.stop()
